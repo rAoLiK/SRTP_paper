@@ -535,12 +535,45 @@ e_{\mathrm{raw}}=P_{\mathrm{apx}}-P_{\mathrm{exact}}
 \section{基于Gemmini的系统级架构集成}
 
 \subsection{Chipyard SoC与Gemmini架构概述}
-本节介绍Chipyard SoC框架和Gemmini加速器的整体结构，包括其生成式硬件设计方式、片上互连关系以及矩阵计算单元的基本组织形式。
+
+在敏捷硬件开发与深度学习加速器体系结构研究领域，Chipyard 提供了一套统一的系统芯片（SoC）生成生态。该生态基于 Scala 与 Chisel 硬件构造语言构建，全面集成了从 RISC-V 开源标量处理器（如 Rocket、BOOM）到各类片上总线、缓存层次结构及特定领域加速器生成器的完整全栈式流程。Gemmini 则是寄宿于 Chipyard 平台下的一个开源的、高度参数化的脉动阵列（Systolic Array）张量加速器生成器，其旨在探究 DNN 负载在包含访存机制与处理器协同情况下的系统级性能表现与实现上限。
+
+从系统级体系结构视角来看，Gemmini 与宿主 RISC-V 处理器核心依据 RoCC（Rocket Custom Coprocessor）非标准自定义协处理器指令集接口进行通信。Gemmini 在此机制下充当专用的矩阵乘法协处理器，直接挂载至处理器核心并经由 TileLink 系统总线访问共享的主存系统（如 L2 Cache 及外部 DRAM）。针对矩阵运算密集且数据带宽需求极高的特征，Gemmini 在内部创新采用了脱耦的访问执行（Decoupled Access/Execute）微体系结构设计原理。整体硬件逻辑被物理区分为并行的读/写控制器（Load/Store Controllers）与执行控制器（Execute Controller）。每类控制器维持独立的指令队列，并由内部重排序缓冲区（ROB）协调资源依赖与写后读（RAW）等数据冲突；在执行流运转时，读写控制器调配两条独立的内存直接访问（DMA）通道，批量、连续地执行系统 DRAM 与前端高速缓存间的大颗粒数据搬移。片上数据则被分类缓存于支持原地运算的累加器存储阵列（Accumulator SRAMs）以及面向基础特征图存取的便签式内存（Scratchpad SRAMs）中。该缓存与调度逻辑有效隐藏了极深的访存长时延，确保高能耗密度的计算通路不因数据饥饿而停滞。
+
+\begin{figure}[htbp]
+    \centering
+    % 占位符：此处需插入自 Gemmini 官方仓库下载的图片
+    % 图片来源：https://github.com/ucb-bar/gemmini/blob/master/img/gemmini-system.png
+    % 请下载图片并重命名为 gemmini-system.png 放入 figures/ 文件夹后取消注释下方代码。
+    % \includegraphics[width=0.8\textwidth]{figures/gemmini-system.png} 
+    \rule{0.8\textwidth}{6cm} % 调试用占位黑框，待插入图片后可删除
+    \vspace{0.2em}
+    \caption{Gemmini 协处理器系统级体系结构框架与存储分层示意图}
+    \label{fig:gemmini-system}
+\end{figure}
+
+剥离开外围脱耦控制调度与繁杂的访存层，Gemmini 的核心算子是通用矩阵乘法操作（General Matrix Multiply, GEMM）。由于自然语言处理引擎尤其是 Transformer 模型的前馈计算充斥着成千上万个非离散的大尺寸矩阵变换轮次，该核心算子的运算效率直接构成了全系统的吞吐率及面积效能瓶颈。在 Gemmini 的实现中，这一核心算子依赖于其结构的最底层——一个二维、参数化及层级重构的脉动阵列（Systolic Array）。该阵列采用网格化布局，其基础构件被称为处理单元（Processing Element, PE）。多个 PE 无寄存器前向组合在一起形成“块”（Tile），相邻 Tile 之间排布着流水线暂存器（Pipeline Registers）。阵列本身不仅支持权重驻留（Weight-Stationary）数据流，也允许针对不同数据位宽及模型拓扑灵活选取输出驻留（Output-Stationary）模式。数据在此多级互联拓扑的触发下，以行和列向连波推进的模式完成大规模并发的“乘加”（Multiply-Accumulate, MAC）物理级收敛。
+
+\begin{figure}[htbp]
+    \centering
+    % 占位符：此处需插入自 Gemmini 官方仓库下载的图片
+    % 图片来源：https://github.com/ucb-bar/gemmini/blob/master/img/gemmini-systolic-array.png
+    % 请下载图片并重命名为 gemmini-systolic-array.png 放入 figures/ 文件夹后取消注释下方代码。
+    % \includegraphics[width=0.6\textwidth]{figures/gemmini-systolic-array.png} 
+    \rule{0.6\textwidth}{5cm} % 调试用占位黑框，待插入图片后可删除
+    \vspace{0.2em}
+    \caption{Gemmini 两级并发的层级脉动阵列微结构与处理单元互连机制}
+    \label{fig:gemmini-systolic}
+\end{figure}
+
+在本研究的设计框架与硬件重构路线内，上述核心算子的基本操作元（即精确乘加部件）成为引入近似计算的主阵地。原有的 PE 节点内部被全精度的数字逻辑硬件乘法器占据，其面积开销及静态漏电流功耗随着脉动网格二维标度的扩大呈现出严酷的平方级攀升。为打通从底层近似算法到宏观架构级特性的整套实证链路，本文工程化实施的关键步骤是以低功耗的近似乘法器核心——例如前文评估所最终沉淀的、具备近零且收敛误差特性的 $8\times8$ 位参数化 TOSAM 模块——在底层代码层面上实现对原生精确乘法器（Exact Multiplier）的全级剥离功能硬替换。
+
+通过精确点状的底层切入与植入，可以在保持大规模并发机制的前提下使阵列表现出多点叠加的微观替换红利。尤其值得注意的是，此种针对硬件抽象语法树叶子节点的“无感”重打配，完全维持了上层由 Gemmini 生成器推演出的时空调度机制、跨域 DMA 寻址通道以及 RISC-V 核心发派指令时的握手逻辑。这种在系统架构与协议一致性上的自洽，意味着替换完成后系统不会产生由流水线断裂引发的性能塌陷；同时，由于单体 MAC 逻辑的关键路径截断及组合逻辑体积的剧烈缩减，将顺着执行数据通路的结构堆栈反向汇聚出巨量的整体能耗与硅片开销优势。在此体系级集成的确立下，本研究可直接切入具备软硬件一致性的仿真与实测环境，通过向其投喂实际的大语言模型推演张量负载，验证这套近乎严苛受限的微架构演进在系统可容忍误差下的极限表现，从而在真正意义上探明近似计算在系统级层面的 PPA（Power, Performance, Area）兑现潜力及其可行边界。
 
 \subsection{Scala生成器逻辑修改与底层适配}
 本节重点说明为集成近似乘法器所进行的Scala生成器修改、RTL适配和接口对接工作，分析系统集成中的关键问题及解决方案。
 
-\subsection{软硬件协同测试}
+\subsection{仿真测试}
 本节介绍系统级验证环境的搭建过程，包括仿真测试、软件驱动适配、功能正确性验证以及协同调试流程。
 
 \clearpage
