@@ -9,59 +9,243 @@
 \usepackage{float}
 
 
-\classname{摸鱼学导论}  % 设置课程名称
-\makepagestyle{}{\printclassname ~实验报告}
-
-
+\classname{面向大语言模型的近似计算加速架构设计}  % 设置课程名称
+\makepagestyle{}{\printclassname ~结项报告}
 
 
 \begin{document}
 \maketitlepage{名字}{地点}{姓名}{学号}{\today}{老师} %封面页 
 
 \maketoc    %目录页
-\section{实验目的和要求}
-\begin{enumerate}
-    \item 了解用集成运算放大器构成简单的正弦波、方波、三角波发生电路的方法。
-\end{enumerate}
+\thispagestyle{empty}
+\begin{center}
+\section*{摘要}
+\end{center}
 
-\section{主要仪器设备}
-\begin{table}[htbp]
-  \centering
-    \begin{tabular}{ccp{20em}}
-    \toprule
-    编号    & 仪器用具名称     & 主要参数（型号，测量范围，测量精度等） \\
-    \midrule
-    1	&	数字万用表\\
-    2	&	直流稳压电源\\
-    3	&	电子技术实验箱\\
-    4	&	示波器\\
-    5	&	函数信号发生器\\
-        6   &	运放LM358\\
-    \bottomrule
-    \end{tabular}%
-  \label{tab:device}%
-\end{table}%
+本文围绕面向大语言模型的近似计算加速架构设计展开研究，重点关注近似乘法器IP的设计优化、误差分析、系统级集成以及性能评估。通过结合Gemmini与Chipyard平台，对所设计算子进行软硬件协同验证，并从误差、精度、功耗、面积和时延等多个维度开展实验分析，为近似计算在大语言模型推理场景中的应用提供参考。
 
-\clearpage % 换页
-\section{实验内容和原理}
-\zhlipsum[5]
+\noindent\textbf{关键词：}近似计算；近似乘法器；大语言模型；Gemmini加速器；硬件设计
+\addcontentsline{toc}{section}{摘要}
 
 \clearpage
-\section{实验结果}
-\zhlipsum[5]
+\section{绪论}
+
+\subsection{研究背景及意义}
+近年来，以Transformer为核心的大语言模型在自然语言处理、
+生成式建模与多模态理解等任务中展现出显著优势，并逐步成为智能计算的重要基础设施。
+然而，此类模型通常包含大规模矩阵乘法、乘加累加以及Softmax、LayerNorm等非线性运算，
+推理过程中伴随高强度计算、频繁数据搬移和显著的存储访问开销，使得系统面临功耗高、时延大、
+带宽压力重等现实瓶颈。尤其在边缘侧或资源受限平台上，传统以全精度计算为基础的通用硬件
+方案难以同时满足吞吐率、能效与部署成本等多方面要求，因此亟需面向模型特征开展更具针
+对性的体系结构优化。
+
+近似计算为上述问题提供了具有理论价值与工程意义的解决路径。已有研究表明，
+神经网络在一定范围内具有误差容忍性，通过在乘法器、非线性算子及数据流组织层面引入可控近似，
+可在精度损失有限的前提下换取面积、功耗与时延等指标的显著改善。
+同时，近似策略只有与量化方法、软硬件协同映射以及应用级精度验证机制相结合，
+才能真正转化为面向实际模型部署的有效方案。因此，围绕大语言模型推理场景研究近似乘法器设计、
+系统级集成与性能评估，不仅有助于拓展近似计算在智能芯片中的应用边界，
+也对构建高能效、可扩展的专用加速架构具有重要的研究意义和应用价值。
+
+\subsection{现有研究综述}
+现有研究主要在三个层面上逐步展开：
+第一层面关注近似乘法器本身，即通过截断、编码简化、压缩树近似和局部补偿等手段降低面积、时延与功耗；
+第二层面关注近似误差如何传递到神经网络任务，进而从“电路指标优先”转向“应用精度约束下的近似选择”；
+第三层面则把问题扩展到 Transformer 及其加速器的数据流和存储系统，讨论单个算术单元之外的系统瓶颈。
+以下将对这三个方面的研究现状进行系统综述。
+
+\subsubsection{以PPA优化为目标的近似乘法器结构设计}
+近似乘法器研究最早形成体系的是固定宽度乘法和部分积截断路线。
+这类工作的出发点很明确，即在大量信号处理系统中，输入和输出字长通常被人为固定，
+因而没有必要完整保留精确乘积的所有低位信息。
+
+Cho 等针对固定宽度改进 Booth 乘法器提出了基于 Booth 
+编码输出的误差补偿方法，不再直接对乘数系数进行校正，而是将被截断部分划分为主补偿区和次补偿区，
+并采用不同的补偿策略生成偏置项，从而在不显著增加偏置电路复杂度的前提下，
+将量化误差相对既有方法最多降低约 50\%，同时相对理想乘法器可节省约 35\% 
+的面积和功耗\cite{cho2004fixedwidth}。它第一次比较清楚地表明：在固定宽度场景下，
+误差补偿不应被视为附属模块，而应与 Booth 编码本身协同设计。图~\ref{fig:related-fixedwidth} 
+所示的主保留部分（MP）与低位截断部分（LP）划分方式，正是后续大量截断乘法器补偿电路设计的基本出发点。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\linewidth]{00_chofixed.png}
+    \caption{固定宽度改进 Booth 乘法器中保留部分与截断部分的划分框架}
+    \label{fig:related-fixedwidth}
+\end{figure}
+
+在固定宽度思想基础上，另一条重要路线利用操作数动态范围，将精确乘法转换为更小位宽的乘法加移位和加法。
+Vahdat 等提出的 LETAM 将输入表示为二进制科学计数形式，仅保留高有效部分参与乘法运算\cite{vahdat2017letam}。
+45 nm 工艺下相对精确乘法器，LETAM 的能量和面积分别改善 89.2\% 与 74.9\%，在 JPEG DCT 应用中 PSNR 下降仅 
+0.15 dB\cite{vahdat2017letam}。后续的 AQ-LETAM 支持运行时精度切换，最高质量模式下功耗仍低精
+确乘法器 79\%\cite{vahdat2017letam}，体现了从"单一近似点设计"向"可调近似机制设计"的演进。
+
+在 LETAM 之后，Vahdat 等提出 TOSAM，结合前导 1 检测、截断和舍入策略，在 32 位乘法上
+相对精确乘法器可实现约 95\% 的能量节省和 85\% 的面积节省，特定配置
+下改进最高分别达 41\%、90\% 和 98\%\cite{vahdat2019tosam}。同时在 JPEG 和分
+类任务中验证了有效性，PSNR/SSIM 下降控制在 1.39 dB 和 0.012 
+以内\cite{vahdat2019tosam}。图~\ref{fig:related-tosam} 体现了 TOSAM 相对于其他结构的优势。
+
+TOSAM 另一关键性质是误差分布近似高斯、均值接近零\cite{vahdat2019tosam}，这对累加型
+计算尤为重要。带明显偏置的误差会在长链累加中持续漂移，而近零均值误差则更易被后续运算吸收。因
+此 TOSAM 强调误差分布形态，将设计目标从"单点误差压缩"提升到"统计特性塑形"层面。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\linewidth]{01_tosam.png}
+    \caption{TOSAM 与其他近似乘法器的延迟-能量对比}
+    \label{fig:related-tosam}
+\end{figure}
+
+如果是固定宽度与动态截断路线侧重于“操作数处理”，Booth 类近似乘法器则直接针
+对“部分积生成与压缩树结构”展开优化。Liu等在 Radix-4 架构下提出精简的近似编码器(R4ABE1与R4ABE2)，
+大幅降低晶体管级复杂度和关键路径延迟，在 NMED 与 PDP 的折中中实现视觉质量保真\cite{liu2017radix4}。Qian
+等多维度扩展该思路，设计 AWBM-II，融合近似编码、近似 4:2 压缩器及
+规则化近似树，规避输出截断的前提下实现了可观的延迟与功耗改善，尤其利于适配阵列
+型硬件加速\cite{qian2016wallacebooth}。
+
+针对高基数(即Radix-8)架构下极大的预处理开销，Jiang 等基于近似2位
+重编码加法器极大优化了硬件 PPA，并在 FIR 滤波器中论证了单一电路级误差无
+法完全映射至系统输出的 SNR 表现\cite{jiang2016radix8}。与此互补，结构层面的
+优化粒度进阶至极低错误概率($1/256$)的近似压缩器，Jaswal 等在手写分类与去噪任
+务中以此取得显著功耗下降并保持高数据质量的成果，充分揭示了选择性精细化近似取代粗
+粒度牺牲的方法优势\cite{jaswal2025approximate}。
+
+横纵向对比可见，底层乘法设计逐渐析出两大具有特定应用意义的范式——通过前导位分离、
+截断及移位加法的“算术等价重构”（如LETAM、TOSAM），其结构改动带来断崖式的能耗缩小但
+敏感于操作数分布；以及对编码器与压缩树开刀的“局部逻辑近似”，较强可控性利于在高性能数据
+流中嵌入。简而言之，即便底层 RTL 重构的 PPA 成绩已大步推进，目前依旧
+亟待建立一个自硬件微结构、全状态误差特征穿透至后端应用级部署的完整分析流。
+
+
+\subsubsection{面向神经网络的误差特征建模与近似映射}
+随着近似乘法器逐步应用于神经网络推理，研究重心从“面积与功耗优化”转向“特定网络中的精度保持”。
+传统误差指标如 NMED、MRED 等仅为统计汇总，未能反映权值分布、激活分布及误差放大机制，导致电路
+级指标与网络精度表现不一致。Jiang 等在 FIR 场景中发现，NMED 较大的设计并不一定导致系统输出
+ SNR 更差\cite{jiang2016radix8}，促使研究进入“误差-应用映射”阶段。
+
+Mo 等构建了包含 1200 余种近似乘法器的大规模库，分析 16 个统计误差特征与神经网络准确
+率退化的关联，发现误差偏置 $\mu E$、平均误差距离 $\mu ED$ 和错误率 ER 的组合最为
+关键\cite{mo2024learning}。基于此构建的分类模型在大多数应用中达到 96\%--99\% 的 top-1 
+分类精度，若允许 3\% 的准确率损失，正确分类概率超过 96\%\cite{mo2024learning}。此外，研究
+表明，较小的 $\mu E$ 并不足以保证网络精度，还需限制 $\mu ED$ 和 ER 的绝对值，否则误差可能在累加
+中放大。图~\ref{fig:related-errorfeatures} 展示了误差特征与应用精度的关系框架。
+
+该研究还提出以 3\% 和 8\% 的准确率损失为分界，将近似乘法器划分为不同类别\cite{mo2024learning}，更
+贴近实际设计流程。通过分阶段缩减设计空间，避免了“先综合、再仿真”的低效流程。进一步分析显示，在 VGG16-CI
+FAR10 场景下，若允许 3\% 的准确率损失，部分乘法器可实现 21.88\% 的 PDP 改进和 27.52\% 的 ADP 改进；若允许
+再训练，收益可超过 40\%\cite{mo2024learning}。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{03_molearning.png}
+    \caption{近似乘法器误差特征与神经网络应用精度退化关系图}
+    \label{fig:related-errorfeatures}
+\end{figure}
+
+上述研究改变了近似乘法器的评价方式，从关注“功耗降低”转向“应用精度约束下的筛选”。
+Danopoulos 等提出基于 PyTorch 的近似仿真框架 TransAxx，结合硬件驱动的 MCTS 搜索，
+优化 Vision Transformer 的分层近似配置，在精度差异小于 1\% 的条件下，功耗平均降低 21\%\cite{danopoulos2025transaxx}。
+该研究表明，不同层对误差的敏感度差异显著，统一替换策略正被更精细的层级映射取代。
+
+从方法论看，近似计算正从“结构设计”转向“结构-模型共同优化”。乘法器不再是静态部件，而是可根据层位置、
+数据分布和精度预算动态调度的资源。
+
+\subsubsection{面向Transformer加速器的数据流与系统协同优化}
+
+当研究对象从卷积网络扩展到 Transformer 时，近似计算的重点转向数据流与存储优化。
+Lee 等分析 BERT-Large 应用发现，自注意力模块延迟占比随序列长度增加显著上升\cite{lee2023hammer}。
+基于注意力概率的长尾分布特性，提出 mean-redistribution 和线性化近似机制，用移位与加法替代复杂计算，
+性能提升 1.2--1.6$\times$，能效提升 1.2--1.5$\times$，面积减少 27\%\cite{lee2023hammer}。图~\ref{fig:related-hammer} 
+展示了延迟分解框架。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{04_hammer.png}
+    \caption{Transformer 应用中自注意力模块的延迟占比分解}
+    \label{fig:related-hammer}
+\end{figure}
+
+如果说 HAMMER 主要解决“注意力计算更便宜”，Han 等的 TranSIC 则聚焦“权
+重搬移更少”\cite{han2026transic}。该研究指出，Transformer 加速器中权重搬移
+能耗占比高达 37.54\%，提出 storage in computing（SIC）方法，将权重矩阵嵌入计算电
+路，避免频繁读取。实验显示，TranSIC 能效提升最高 56.24$\times$，吞吐提升 9.81$\times$，数据
+搬移次数减少 42.98\%，能耗降低 45.49\%\cite{han2026transic}。图~\ref{fig:related-transic} 展
+示了数据搬移与能耗分解框架。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.6\textwidth]{05_hantransic.png}
+    \caption{Transformer 加速器中数据搬移数量与能耗分解图}
+    \label{fig:related-transic}
+\end{figure}
+
+应当指出，已有工作开始将近似计算拓展至 ViT 及更大规模模型，但多属趋势性补充而非本文核心。例如，TransAxx 指出近似乘法器的选型需与层级敏感性、量化和再训练联动考虑\cite{danopoulos2025transaxx}；MSDM 通过基于最高有效位的移位乘法，在单元级实现约 28.31\% 面积缩减、57.84\% 功耗下降和 11.86\% 延迟改善，并在若干 DNN 任务中达成约 60\% 的能量节省且精度近乎无损\cite{gong2024msdm}。总体来看，这些成果表明近似乘法器正与量化、层级搜索及专用阵列协同发展，但研究多数聚焦于特定模型或 GEMM 数据通路的定制优化，而非面向通用张量加速器的可复用近似乘法器 IP 的系统化集成。
+
+\subsection{本文主要研究内容}
+本文的主要研究内容可概括为三个相互关联的部分：
+
+第一，设计并实现可复用的近似乘法器 IP（含 RTL/Chisel 实现与可配置精度选项），在电路层面开展 PPA 优化与实现权衡；
+
+第二，构建算子级与应用级的误差刻画与映射流程，进行全遍历误差统计、误差特征建模以及基
+于量化和再训练的鲁棒性评估；
+
+第三，将近似乘法器集成到 Chipyard Gemmini生成器中，完成 Scala 生成器适配、系统级仿真与软硬件协同验证，
+并对集成方案开展逻辑综合、跨工艺外推及PPA评估。
+
+通过上述工作，本文旨在建立从微结构设计到阵列加速器系统集成的跨层验证链路，
+提供面向大模型矩阵乘法的可复用近似计算 IP 与工程化验证方法。
 
 \clearpage
-\section{实验探究}
-\zhlipsum[5]
-\begin{problem}
-adsfa
-\end{problem}
-\begin{solution}
-\end{solution}
-\begin{lstlisting}[language=Python, caption=Python example]
-def hello_world():
-    print("Hello, world!")
-\end{lstlisting}
+\section{近似乘法器算子架构分析}
+
+\subsection{典型近似乘法器架构剖析}
+本节对三种典型近似乘法器架构进行分析，从部分积生成、压缩树结构、关键路径与误差特性等角度展开比较，为后续IP设计与优化提供依据。
+
+\clearpage
+\section{近似乘法器IP的RTL设计与优化}
+
+\subsection{近似乘法器的底层设计}
+本节介绍近似乘法器IP的RTL实现流程、模块划分及关键创新点。必要时可结合Chisel或Verilog代码片段说明设计思路与优化方法。
+
+\subsection{算子级全遍历误差分析}
+本节对近似乘法器开展算子级全遍历测试，统计不同输入组合下的误差分布、平均误差和最大误差，并结合已有图表与实验数据进行分析。
+
+\subsection{应用级精度验证机制}
+本节说明基于AdaPT平台构建的应用级精度验证流程，结合典型数据集测试结果，分析近似算子对模型输出精度和任务性能的影响。
+
+\clearpage
+\section{基于Gemmini的系统级架构集成}
+
+\subsection{Chipyard SoC与Gemmini架构概述}
+本节介绍Chipyard SoC框架和Gemmini加速器的整体结构，包括其生成式硬件设计方式、片上互连关系以及矩阵计算单元的基本组织形式。
+
+\subsection{Scala生成器逻辑修改与底层适配}
+本节重点说明为集成近似乘法器所进行的Scala生成器修改、RTL适配和接口对接工作，分析系统集成中的关键问题及解决方案。
+
+\subsection{软硬件协同测试}
+本节介绍系统级验证环境的搭建过程，包括仿真测试、软件驱动适配、功能正确性验证以及协同调试流程。
+
+\clearpage
+\section{实验结果与性能评估}
+
+\subsection{误差与精度评估}
+本节汇总近似乘法器在算子级和应用级测试中的误差与精度结果，从不同配置下比较其精度损失与可接受性。
+
+\subsection{逻辑综合与PPA评估}
+本节对设计进行逻辑综合，并从功耗（Power）、性能（Performance）和面积（Area）三个方面开展PPA评估，分析设计优化带来的综合收益。
+
+\subsection{跨工艺节点的性能映射与外推研究}
+本节基于已有研究中的工艺缩放规律，对不同工艺节点下的面积、频率和功耗进行映射与外推，讨论设计在更先进工艺下的潜在表现。
+
+\clearpage
+\section{总结与展望}
+
+\subsection{工作总结}
+本节总结本文围绕近似计算加速架构所开展的主要工作，概括从理论分析、算子设计、系统集成到实验验证的整体研究成果。
+
+\subsection{存在的不足与展望}
+本节分析当前工作的局限性，例如误差控制、适用模型范围、系统验证规模等，并展望后续在更复杂模型、更先进工艺和更完善软硬件协同优化方向上的研究空间。
 
 \clearpage
 \appendix
