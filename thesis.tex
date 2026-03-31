@@ -8,6 +8,8 @@
 \graphicspath{{./figures/}} % 指定图片所在文件夹  
 \usepackage{float}
 \usepackage{subcaption}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning}
 
 
 \classname{面向大语言模型的近似计算加速架构设计}  % 设置课程名称
@@ -327,15 +329,204 @@ K[i] = \left(\bigwedge_{j=i+1}^{n-2}\overline{I[j]}\right)\wedge I[i], \qquad 0\
 
 \clearpage
 
-\section{近似乘法器IP的RTL设计与优化}
+\section{近似乘法器的RTL设计与验证分析}
+
+基于前文对近似乘法器架构的分析，本节将详细阐述所选用近似乘法器 IP 的 RTL 实现流程、
+模块划分方案、核心创新点，以及算子级与应用级的误差分析和精度验证方法。
+通过系统化的设计与验证流程，保障所实现的近似乘法器在实现预期 PPA 优化目标的同时，
+能够在实际应用场景中维持可接受的计算精度。需要说明的是，本文所复现的近似
+乘法器均为有符号8bit乘法器，后续
+将重点对量化至8bit版本的近似乘法器进行性能与精度验证，确保其适配目标应用场景的量化需求。
 
 
+\subsection{近似乘法器的底层RTL设计}
 
-\subsection{近似乘法器的底层设计}
-本节介绍近似乘法器IP的RTL实现流程、模块划分及关键创新点。必要时可结合Chisel或Verilog代码片段说明设计思路与优化方法。
+为兼顾参数化开发效率与工程级集成，本研究采用基于 Scala 的 Chisel 作为算子级 
+RTL 开发语言。Chisel 在抽象表达、参数化生成及与 Chipyard 
+等开源生态的兼容性方面具备明显优势，便于在不同参数配置间
+快速迭代电路结构并保持代码可复用性。基于此，本文构建了从 Chisel 源
+码到门级网表的标准化复现流程（见图~\ref{fig:chisel-flow}）：首
+先在 Chisel 层实现参数化算子并完成单元测试；其次通过编译链生
+成符合工程规范的 SystemVerilog RTL；最后以该 RTL 为对象开展功能一致性仿真、门
+级时序验证与 EDA 前端的逻辑综合评估。该流程既保证了设计的工程可验证性，
+也为后续系统级集成和 PPA 评估提供了可重复的实现路径。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        node distance=1.2cm,
+        block/.style={rectangle, draw=black!80, thick, fill=black!3, text width=2.6cm, align=center, rounded corners=2pt, minimum height=1.4cm, font=\small},
+        line/.style={draw=black!80, thick, -{Stealth[length=2.5mm, width=1.5mm]}, shorten >=1pt, shorten <=1pt}
+    ]
+        \node [block] (chisel) {Chisel\\参数化源代码};
+        \node [block, right=of chisel] (sv) {SystemVerilog\\RTL代码生成};
+        \node [block, right=of sv] (sim) {标准仿真器\\功能验证};
+        \node [block, right=of sim] (synth) {EDA工具链\\逻辑综合评估};
+
+        \draw[line] (chisel) -- node[midway, above=3pt, font=\scriptsize] {编译} (sv);
+        \draw[line] (sv) -- (sim);
+        \draw[line] (sim) -- (synth);
+    \end{tikzpicture}
+    \caption{基于 Chisel 的近似算子底层设计与复现流程范式}
+    \label{fig:chisel-flow}
+\end{figure}
+
+\subsubsection{TOSAM近似乘法器的RTL实现}
+
+本文对 TOSAM 的 RTL 复现采用 Chisel 参数化建模方法，将算法参数、模块边界与位宽推导统一收敛到生成器框架中。工程首先在 \texttt{TOSAMConfig} 中定义输入位宽 $n$、舍入参数 $h$ 与符号属性，并自动派生截断参数 $t$、小乘法器位宽以及分数和位宽
+\(
+l=2+\max(t,2h+2)
+\)。
+这种实现方式使前文的近似乘积表达式能够直接映射为结构参数，而无需在不同模块中重复维护常量。随后，\texttt{TOSAMGenerator} 根据命令行参数或环境变量实例化 \texttt{TOSAM} 或 \texttt{TOSAMSigned}，并调用 CIRCT 后端生成 SystemVerilog；面向 Gemmini 集成时，则进一步通过 \texttt{ApproxMulGenerator} 固定导出 8 位有符号输入、16 位有符号输出的 \texttt{approx\_mul\_single.sv}，从而得到可以直接嵌入处理单元的数据通路实现。代码~\ref{lst:tosam-config} 给出了参数配置与顶层实例化的基本形式。
+
+\begin{lstlisting}[caption={TOSAM 的参数化配置与顶层实例化方式},label={lst:tosam-config},basicstyle=\ttfamily\small]
+case class TOSAMConfig(n: Int = 16, h: Int = 3, signed: Boolean = true) {
+  val t: Int = if (h > 0) h + 4 else 3
+  val smallMultWidth: Int = h + 1
+  val fracSumWidth: Int = 2 + math.max(t, 2 * h + 2)
+  val outputWidth: Int = 2 * n
+}
+
+val config = TOSAMConfig(n = 8, h = 3, signed = true)
+val multiplier = Module(new TOSAMSigned(config))
+\end{lstlisting}
+
+对于无符号主路径，\texttt{TOSAM.scala} 严格对应式~\eqref{eq:tosam_final} 的硬件分解过程。首先，两个 \texttt{LeadingOneDetector} 分别提取输入最高有效位位置，并利用 \texttt{found} 信号完成零输入检测。随后，\texttt{TruncationUnit} 通过
+\(
+\texttt{io.in << ((n-1)-k)}
+\)
+完成标准化左移，再直接截取高位分数部分，得到 $(Y_A)_t$ 与 $(Y_B)_t$。第三步的 \texttt{ArithmeticUnit} 是近似核的核心：\texttt{RoundingUnit} 仅保留截断结果的前 $h$ 位并在最低位补入常数 1，以实现 odd-rounding；\texttt{SmallMultiplier} 对两个 $(h+1)$ 位近似分数执行精确乘法；随后算术核心根据 $t$ 与 $2h+2$ 的大小关系完成位宽对齐，并与常数项及两个截断项相加。最后，\texttt{ShiftUnit} 以 $\max(t,2h+2)$ 为偏移基准，在 \texttt{kA + kB} 大于该偏移时执行左移，否则执行右移，从而恢复指数部分的量级。整个主路径保持为纯组合结构，有利于后续综合与关键路径分析。代码~\ref{lst:tosam-arith} 给出了算术核心中最关键的组合逻辑。
+
+\begin{lstlisting}[caption={ArithmeticUnit 的关键组合逻辑},label={lst:tosam-arith},basicstyle=\ttfamily\small]
+val roundA = Module(new RoundingUnit(t, h))
+val roundB = Module(new RoundingUnit(t, h))
+val mult = Module(new SmallMultiplier(h + 1))
+
+if (t > 2 * h + 2) {
+  val one = Cat(1.U(2.W), 0.U(t.W))
+  val paddedMult = Cat(mult.io.product, 0.U((t - 2 * (h + 1)).W))
+  io.result := one +& io.yAt +& io.yBt +& paddedMult
+} else {
+  val alignWidth = 2 * h + 2
+  val one = Cat(1.U(2.W), 0.U(alignWidth.W))
+  io.result := one +& paddedYAt +& paddedYBt +& mult.io.product
+}
+\end{lstlisting}
+
+在有符号实现中，\texttt{TOSAMSigned.scala} 并未直接构造补码近似乘法器，而是采用“幅值变换、无符号近似乘法、符号恢复”的分层封装策略。两个 \texttt{ApproxAbs} 模块首先输出输入操作数的幅值与符号位，其中对最小负数采用饱和到最大正值的处理，以避免补码绝对值运算中的溢出问题；随后调用无符号 \texttt{TOSAM} 完成近似乘法，再通过异或得到结果符号，并在输出端进行一次范围裁剪。该实现既保持了无符号近似核的可复用性，也降低了有符号版本的额外设计复杂度。
+
+由 \texttt{ApproxMulGenerator} 导出的 \texttt{approx\_mul\_single.sv} 已经被整理为单文件
+ SystemVerilog，其内部依次包含 \texttt{ApproxAbs}、\texttt{LeadingOneDetector}、
+ \texttt{TruncationUnit}、\texttt{RoundingUnit}、\texttt{SmallMultiplier}、
+ \texttt{ArithmeticUnit}、\texttt{ShiftUnit}、\texttt{TOSAM}、\texttt{TOSAMSigned} 
+ 与 \texttt{approx\_mul} 十个模块。与 Chisel 源码相比，生成后的 RTL 不再保留参数推导，
+ 而是展开为固定 8 位配置下的静态组合逻辑。
+
 
 \subsection{算子级全遍历误差分析}
-本节对近似乘法器开展算子级全遍历测试，统计不同输入组合下的误差分布、平均误差和最大误差，并结合已有图表与实验数据进行分析。
+由于所设计的近似乘法器均为8bit有符号乘法器，输入空间包含 $2^{16}$ 个组合。
+为了全面评估近似乘法器的误差特性，本研究采用全遍历仿真方法，
+对每一个输入组合计算精确乘积与近似乘积之间的误差，并统计误差分布、
+平均误差、最大误差等关键指标。通过分析这些统计结果，可以深入理解近似乘
+法器在不同输入条件下的表现，为后续的应用级精度验证提供理论基础。
+
+\subsubsection{TOSAM误差分析}
+
+针对 TOSAM 的算子级误差特性，本文对四组配置 TOSAM$(0,3)$、TOSAM$(1,4)$、TOSAM$(2,6)$ 
+与 TOSAM$(3,7)$ 分别进行了 8 位有符号乘法全遍历分析。输入覆盖区间为 $[-128,127]$，共得到 $65\,536$ 组样本；对每组样本同时计算精确乘积与近似乘积，并以
+\(
+e_{\mathrm{raw}}=P_{\mathrm{apx}}-P_{\mathrm{exact}}
+\)
+为基础统计 MAE、RMSE、相对误差、最坏误差及误差分位点，同时结合误差直方图、
+输入空间热力图和箱线图观察误差在全输入域内的分布特征。
+
+表~\ref{tab:tosam-error-compare} 给出了四组配置的统一统计结果。可以看出，随着参数 $h,t$ 增大，误差指标呈现出明显的单调下降趋势：MAE 由 TOSAM$(0,3)$ 的 $339.18$ 下降至 TOSAM$(3,7)$ 的 $45.42$，RMSE 由 $598.58$ 下降至 $72.90$，P99 原始误差也由 $2046$ 收缩至 $224$。与此同时，所有配置的中位误差均为 0，且未出现符号翻转错误，说明 TOSAM 的主要问题并非符号失真，而是低精度配置下截断误差和尾部误差过大。对于矩阵乘法这类累加深度较高的场景，TOSAM$(0,3)$、TOSAM$(1,4)$ 和 TOSAM$(2,6)$ 的最坏误差与高分位误差仍然偏大，经过多次乘加累积后容易放大为不可忽略的输出偏差，因此难以满足后续系统级应用对误差传播的约束。
+
+\begin{table}[htbp]
+    \centering
+    \caption{四组 TOSAM 配置的全遍历误差统计对比}
+    \label{tab:tosam-error-compare}
+    \small
+    \setlength{\tabcolsep}{5pt}
+    \begin{tabular}{lcccc}
+        \toprule
+        指标 & TOSAM$(0,3)$ & TOSAM$(1,4)$ & TOSAM$(2,6)$ & TOSAM$(3,7)$ \\
+        \midrule
+        ME & $-0.0625$ & $-0.0313$ & $-0.0166$ & $-0.0095$ \\
+        MAE & $339.18$ & $168.90$ & $86.63$ & $45.42$ \\
+        RMSE & $598.58$ & $277.15$ & $140.29$ & $72.90$ \\
+        MARE & $7.91\%$ & $4.26\%$ & $2.24\%$ & $1.20\%$ \\
+        WRE & $25.00\%$ & $13.89\%$ & $6.64\%$ & $3.81\%$ \\
+        WAE & $4096$ & $2048$ & $1088$ & $624$ \\
+        $P99_{\mathrm{raw}}$ & $2046$ & $845$ & $436.65$ & $224$ \\
+        Zero Errors & $703$ & $1247$ & $2471$ & $4527$ \\
+        Sign Errors & $0$ & $0$ & $0$ & $0$ \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+从图~\ref{fig:tosam-hist-grid}--图~\ref{fig:tosam-box-grid} 也可以直观看到这一变化规律。低精度配置的直方图具有更宽的尾部，热力图中高误差点在大幅值输入区域更加密集，箱线图的离群点范围也显著更长；而 TOSAM$(3,7)$ 的误差分布已明显收敛，误差主体集中在零附近，输入空间边缘的高误差区域亦得到有效压缩。结合 8 位乘法本身有效精度有限这一事实可以看出，当可用位宽较小时，过于激进的截断会直接侵蚀有效数值信息，使局部乘法误差在乘加链中快速累积。基于这一结果，本文后续系统集成与应用级验证仅保留 TOSAM$(3,7)$ 作为候选配置；其余参数组合虽然具有更高的硬件节省潜力，但误差水平难以满足矩阵乘法累积误差控制的实际要求。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam03_histogram.png}
+        \caption{TOSAM$(0,3)$}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam14_histogram.png}
+        \caption{TOSAM$(1,4)$}
+    \end{subfigure}
+
+    \vspace{0.2em}
+
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam26_histogram.png}
+        \caption{TOSAM$(2,6)$}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam37_histogram.png}
+        \caption{TOSAM$(3,7)$}
+    \end{subfigure}
+    \caption{四组 TOSAM 配置的误差直方图与经验累积分布对比}
+    \label{fig:tosam-hist-grid}
+\end{figure}
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam03_heatmap.png}
+        \caption{TOSAM$(0,3)$}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam14_heatmap.png}
+        \caption{TOSAM$(1,4)$}
+    \end{subfigure}
+
+    \vspace{0.2em}
+
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam26_heatmap.png}
+        \caption{TOSAM$(2,6)$}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.46\textwidth}
+        \centering
+        \includegraphics[width=\textwidth]{figures/08_tosam37_heatmap.png}
+        \caption{TOSAM$(3,7)$}
+    \end{subfigure}
+    \caption{四组 TOSAM 配置在输入空间上的误差分布热力图对比}
+    \label{fig:tosam-heat-grid}
+\end{figure}
+
+
+
 
 \subsection{应用级精度验证机制}
 本节说明基于AdaPT平台构建的应用级精度验证流程，结合典型数据集测试结果，分析近似算子对模型输出精度和任务性能的影响。
@@ -353,7 +544,7 @@ K[i] = \left(\bigwedge_{j=i+1}^{n-2}\overline{I[j]}\right)\wedge I[i], \qquad 0\
 本节介绍系统级验证环境的搭建过程，包括仿真测试、软件驱动适配、功能正确性验证以及协同调试流程。
 
 \clearpage
-\section{实验结果与性能评估}
+\section{测试结果与性能评估}
 
 \subsection{误差与精度评估}
 本节汇总近似乘法器在算子级和应用级测试中的误差与精度结果，从不同配置下比较其精度损失与可接受性。
