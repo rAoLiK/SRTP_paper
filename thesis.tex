@@ -7,6 +7,7 @@
 \onehalfspacing % 1.5倍行距  
 \graphicspath{{./figures/}} % 指定图片所在文件夹  
 \usepackage{float}
+\usepackage{subcaption}
 
 
 \classname{面向大语言模型的近似计算加速架构设计}  % 设置课程名称
@@ -70,7 +71,7 @@ Cho 等针对固定宽度改进 Booth 乘法器提出了基于 Booth
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\linewidth]{00_chofixed.png}
-    \caption{固定宽度改进 Booth 乘法器中保留部分与截断部分的划分框架}
+    \caption{固定宽度改进 Booth 乘法器中保留部分与截断部分的划分框架\cite{cho2004fixedwidth}}
     \label{fig:related-fixedwidth}
 \end{figure}
 
@@ -93,7 +94,7 @@ TOSAM 另一关键性质是误差分布近似高斯、均值接近零\cite{vahda
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\linewidth]{01_tosam.png}
-    \caption{TOSAM 与其他近似乘法器的延迟-能量对比}
+    \caption{TOSAM 与其他近似乘法器的延迟-能量对比\cite{vahdat2019tosam}}
     \label{fig:related-tosam}
 \end{figure}
 
@@ -139,7 +140,7 @@ FAR10 场景下，若允许 3\% 的准确率损失，部分乘法器可实现 21
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\textwidth]{03_molearning.png}
-    \caption{近似乘法器误差特征与神经网络应用精度退化关系图}
+    \caption{近似乘法器误差特征与神经网络应用精度退化关系图\cite{mo2024learning}}
     \label{fig:related-errorfeatures}
 \end{figure}
 
@@ -162,7 +163,7 @@ Lee 等分析 BERT-Large 应用发现，自注意力模块延迟占比随序列�
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\textwidth]{04_hammer.png}
-    \caption{Transformer 应用中自注意力模块的延迟占比分解}
+    \caption{Transformer 应用中自注意力模块的延迟占比分解图\cite{lee2023hammer}}
     \label{fig:related-hammer}
 \end{figure}
 
@@ -176,7 +177,7 @@ Lee 等分析 BERT-Large 应用发现，自注意力模块延迟占比随序列�
 \begin{figure}[htbp]
     \centering
     \includegraphics[width=0.6\textwidth]{05_hantransic.png}
-    \caption{Transformer 加速器中数据搬移数量与能耗分解图}
+    \caption{Transformer 加速器中数据搬移数量与能耗分解图\cite{han2026transic}}
     \label{fig:related-transic}
 \end{figure}
 
@@ -187,8 +188,7 @@ Lee 等分析 BERT-Large 应用发现，自注意力模块延迟占比随序列�
 
 第一，设计并实现可复用的近似乘法器 IP（含 RTL/Chisel 实现与可配置精度选项），在电路层面开展 PPA 优化与实现权衡；
 
-第二，构建算子级与应用级的误差刻画与映射流程，进行全遍历误差统计、误差特征建模以及基
-于量化和再训练的鲁棒性评估；
+第二，构建算子级与应用级的误差刻画与映射流程，进行全遍历误差统计、误差特征建模以及基于量化和再训练的鲁棒性评估；
 
 第三，将近似乘法器集成到 Chipyard Gemmini生成器中，完成 Scala 生成器适配、系统级仿真与软硬件协同验证，
 并对集成方案开展逻辑综合、跨工艺外推及PPA评估。
@@ -199,11 +199,137 @@ Lee 等分析 BERT-Large 应用发现，自注意力模块延迟占比随序列�
 \clearpage
 \section{近似乘法器算子架构分析}
 
-\subsection{典型近似乘法器架构剖析}
-本节对三种典型近似乘法器架构进行分析，从部分积生成、压缩树结构、关键路径与误差特性等角度展开比较，为后续IP设计与优化提供依据。
+为系统评估近似乘法器在矩阵乘法通路中的适用性与误差特性，
+本研究选取三种具有代表性的近似乘法器架构进行复现、参数化实现与对比优化：
+TOSAM（基于前导位检测的截断与舍入策略）、Radix‑8 Booth（针对部分积生成与压缩树的
+局部逻辑近似）以及 LETAM（基于二进制科学计数的动态位宽重构）。
+本节将详细介绍这三种架构的算法原理、硬件架构以及可配置精度设计，
+为后续的 RTL 实现与系统集成奠定基础。
+
+\subsection{TOSAM：一种基于截断与舍入的节能型可扩展近似乘法器}
+TOSAM（Truncation- and Rounding-Based Scalable Approximate Multiplier）由 Vahdat 等提出，
+其核心目标不是在部分积压缩树或末级加法器中局部引入近似，而是直接从操作数表示方式入手，
+利用前导“1”位置对输入动态范围进行重构，从而将原本完整的 $n$ 位乘法转化为“移位 + 截断加法 + 
+小位宽乘法”的组合运算\cite{vahdat2019tosam}。
+一方面，近似乘法核心的规模主要由参数 $h$ 和 $t$ 决定，而与原始操作数字长弱相关，
+因此具有良好的可扩展性；另一方面，通过在截断基础上进一步引入舍入，TOSAM 将误差分
+布调整为近似高斯且均值接近零的形态，使其更适合后续累加型计算。
+
+TOSAM 的算法基础是将正整数重新写成以前导“1”为基准的二进制科学计数形式。
+对于任意正整数 $N$，设其最高有效“1”位位置为 $k$，则有
+\begin{equation}
+N=\sum_{i=0}^{k}2^{i}x_i ,
+\label{eq:tosam_n}
+\end{equation}
+进一步提出公因子 $2^k$，可得
+\begin{equation}
+N=2^k\left(\sum_{i=0}^{k}2^{i-k}x_i\right)=2^k X ,
+\label{eq:tosam_x}
+\end{equation}
+其中 $X\in[1,2)$。若两个输入操作数分别为 $A$ 和 $B$，则精确乘法可表示为
+\begin{equation}
+A\times B = 2^{k_A+k_B}X_A X_B .
+\label{eq:tosam_exact}
+\end{equation}
+式~\eqref{eq:tosam_exact} 的难点在于 $X_A$ 与 $X_B$ 仍保持接近原输入位宽，因而 $X_A X_B$ 仍然昂贵。为此，原文定义
+\begin{equation}
+Y = X-1,
+\label{eq:tosam_y}
+\end{equation}
+使得 $Y\in[0,1)$，从而将乘法问题改写为对分数部分的近似处理。
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{06_TOSAM1.png} 
+    \caption{TOSAM 中分数项 $Y$ 的分段近似示意图\cite{vahdat2019tosam}}
+    \label{fig:tosam-seg}
+\end{figure}
+
+设分段数为
+\begin{equation}
+S=2^h,
+\label{eq:tosam_s}
+\end{equation}
+其中 $h$ 为控制近似精度的设计参数。原文将 $Y$ 的近似值定义为各区间的中值，即
+\begin{equation}
+Y_{\mathrm{APX}}=\frac{2m-1}{2S}, \qquad \frac{m-1}{S}\le Y < \frac{m}{S}, \quad m=1,2,\ldots,S.
+\label{eq:tosam_yapx}
+\end{equation}
+这一表达式的硬件含义非常重要：为了得到 $Y_{\mathrm{APX}}$，并不需要完整的比较器和查找表，只需截取 $Y$ 的前 $h$ 位，再在截断结果右侧补入一个恒为“1”的最低位即可。这意味着 $Y_{\mathrm{APX}}$ 的生成本质上是“截断 + 固定舍入”，而非一般意义上的复杂量化过程。将式~\eqref{eq:tosam_y} 代回式~\eqref{eq:tosam_exact}，精确乘法可写为
+\begin{equation}
+A\times B = 2^{k_A+k_B}\left(1+Y_A+Y_B+Y_A Y_B\right).
+\label{eq:tosam_expand}
+\end{equation}
+为了进一步降低硬件成本，TOSAM 并不保留完整的 $Y_A$ 和 $Y_B$，而是仅保留其前 $t$ 位，分别记为 $(Y_A)_t$ 和 $(Y_B)_t$，同时用更短位宽的 $(Y_A)_{\mathrm{APX}}$ 与 $(Y_B)_{\mathrm{APX}}$ 近似乘法项。于是最终的近似结果为
+\begin{equation}
+(A\times B)_{\mathrm{APX}}
+\approx
+2^{k_A+k_B}
+\left(
+1+(Y_A)_t+(Y_B)_t+(Y_A)_{\mathrm{APX}}(Y_B)_{\mathrm{APX}}
+\right).
+\label{eq:tosam_final}
+\end{equation}
+式~\eqref{eq:tosam_final} 就是 TOSAM 的核心算法。
+它对应的结构含义是：原始 $n\times n$ 乘法已被分解为一个由常数项、
+两个截断分数项以及一个 $(h+1)$ 位小乘法项构成的计算核，再整体左移 $k_A+k_B$ 位即可得到结果。
+
+从硬件实现角度看，TOSAM 的数据通路具有非常清晰的模块边界。
+其第一个关键模块是 Approximate Absolute Unit，
+用于在有符号场景下快速生成输入的近似绝对值；
+作者并未采用完全精确的补码求绝对值，而是复用了早期工作的近似绝对值电路，
+以避免在输入预处理阶段重新引入较长关键路径\cite{vahdat2019tosam}。
+第二个关键模块是 Leading-One Detector Unit，用于找出 $|A|_{\mathrm{app}}$ 与 $|B|_{\mathrm{app}}$ 
+的前导“1”位置，并生成 $k_A$、$k_B$ 以及相应 one-hot 形式的检测信号。原文给出的逻辑形式为
+\begin{equation}
+K[i] = \left(\bigwedge_{j=i+1}^{n-2}\overline{I[j]}\right)\wedge I[i], \qquad 0\le i \le n-2,
+\label{eq:tosam_lod}
+\end{equation}
+其中 $I$ 表示输入绝对值向量。该式表明，只有当前位为“1”且其更高位全为“0”时，$K[i]$ 才为真。第三个关键模块是 Truncation Unit，它依据前导位位置，从标准化后的分数项中提取 $(Y_A)_t$ 和 $(Y_B)_t$。原文给出的位级关系为
+\begin{equation}
+(Y)_t[i] = \bigvee_{j=0}^{n-2}\left(K[j]\wedge I[j+i-t]\right), \qquad i<t.
+\label{eq:tosam_trunc}
+\end{equation}
+式~\eqref{eq:tosam_trunc} 的本质是按前导位位置完成“对齐后截断”，从而避免显式移位桶形器。接下来的 Arithmetic Unit 完成式~\eqref{eq:tosam_final} 中括号部分的求和与小位宽乘法，且 $(Y_A)_{\mathrm{APX}}$ 与 $(Y_B)_{\mathrm{APX}}$ 可以由 $(Y_A)_t$ 和 $(Y_B)_t$ 直接布线生成，无需额外复杂逻辑。最后，Shift Unit 完成整体左移 $k_A+k_B$，Sign and Zero Detector Unit 负责恢复结果符号并处理零输入情况。按照原文的实现流程，unsigned 版本只需删去近似绝对值与符号恢复模块即可\cite{vahdat2019tosam}。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[height=4.0cm]{06_TOSAM4.png}
+        \caption{TOSAM 有符号实现的总体硬件框图\cite{vahdat2019tosam}}
+        \label{fig:tosam-arch}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.49\textwidth}
+        \centering
+        \includegraphics[height=4.0cm]{06_TOSAM6.png}
+        \caption{TOSAM 不同精度模式下的归约结构\cite{vahdat2019tosam}}
+        \label{fig:tosam-config}
+    \end{subfigure}
+    \caption{TOSAM 的硬件架构与可配置精度设计}
+    \label{fig:tosam-pair}
+\end{figure}
+
+为支持运行时精度切换，原文提出 accuracy‑configurable TOSAM，在单一硬件中实现多组 $(h,t)$ 配置，并通过功耗门控与布线复用在模式
+间切换\cite{vahdat2019tosam}。32 位可配置实现包含三种模式：T2、T6 与 T9，分别对应 TOSAM$(0,2)$、$(2,6)$ 和 $(5,9)$。Truncation 
+与 Shift 单元按最大 $h,t$ 配置实现，Arithmetic 单元通过 power‑gating 在低精度模式下削减部分积与归约级，低位结果由传输门置零或旁路输
+出（见图~\ref{fig:tosam-config}）。原文误差分
+析指出：当 $h>0$ 时 $t=h+4$ 在精度、速度与能耗
+间较优；$h=0$ 时 $t=3$ 对应最小 MARE\cite{vahdat2019tosam}。该经验
+可沿 $t=h+4$ 轨迹简化参数搜索，显著降低探索成本。
+
+\subsection{}
+
+\subsection{}
+
+
+
 
 \clearpage
+
 \section{近似乘法器IP的RTL设计与优化}
+
+
 
 \subsection{近似乘法器的底层设计}
 本节介绍近似乘法器IP的RTL实现流程、模块划分及关键创新点。必要时可结合Chisel或Verilog代码片段说明设计思路与优化方法。
