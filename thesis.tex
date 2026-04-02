@@ -465,7 +465,13 @@ e_{\mathrm{raw}}=P_{\mathrm{apx}}-P_{\mathrm{exact}}
     \end{tabular}
 \end{table}
 
-从图~\ref{fig:tosam-hist-grid}--图~\ref{fig:tosam-box-grid} 也可以直观看到这一变化规律。低精度配置的直方图具有更宽的尾部，热力图中高误差点在大幅值输入区域更加密集，箱线图的离群点范围也显著更长；而 TOSAM$(3,7)$ 的误差分布已明显收敛，误差主体集中在零附近，输入空间边缘的高误差区域亦得到有效压缩。结合 8 位乘法本身有效精度有限这一事实可以看出，当可用位宽较小时，过于激进的截断会直接侵蚀有效数值信息，使局部乘法误差在乘加链中快速累积。基于这一结果，本文后续系统集成与应用级验证仅保留 TOSAM$(3,7)$ 作为候选配置；其余参数组合虽然具有更高的硬件节省潜力，但误差水平难以满足矩阵乘法累积误差控制的实际要求。
+从图~\ref{fig:tosam-hist-grid}--图~\ref{fig:tosam-heat-grid} 也可以直观看到这一变化规律。
+低精度配置的直方图具有更宽的尾部，热力图中高误差点在大幅值输入区域更加密集
+；而 TOSAM$(3,7)$ 的误差分布已明显收敛，误差主体集中在零附近，
+输入空间边缘的高误差区域亦得到有效压缩。结合 8 位乘法本身有效精度有限这一事实可以看出，
+当可用位宽较小时，过于激进的截断会直接侵蚀有效数值信息，使局部乘法误差在乘加链中快速累积。
+基于这一结果，本文后续系统集成与应用级验证仅保留 TOSAM$(3,7)$ 作为候选配置；
+其余参数组合虽然具有更高的硬件节省潜力，但误差水平难以满足矩阵乘法累积误差控制的实际要求。
 
 \begin{figure}[htbp]
     \centering
@@ -536,45 +542,222 @@ e_{\mathrm{raw}}=P_{\mathrm{apx}}-P_{\mathrm{exact}}
 
 \subsection{Chipyard SoC与Gemmini架构概述}
 
-在敏捷硬件开发与深度学习加速器体系结构研究领域，Chipyard 提供了一套统一的系统芯片（SoC）生成生态。该生态基于 Scala 与 Chisel 硬件构造语言构建，全面集成了从 RISC-V 开源标量处理器（如 Rocket、BOOM）到各类片上总线、缓存层次结构及特定领域加速器生成器的完整全栈式流程。Gemmini 则是寄宿于 Chipyard 平台下的一个开源的、高度参数化的脉动阵列（Systolic Array）张量加速器生成器，其旨在探究 DNN 负载在包含访存机制与处理器协同情况下的系统级性能表现与实现上限。
+在敏捷硬件开发与深度学习加速器体系结构研究领域，Chipyard \cite{chipyard}
+提供了一套统一的系统芯片（SoC）生成生态。该生态基于 Scala 与 Chisel 硬件构造语言构建，
+全面集成了从 RISC-V 开源标量处理器（如 Rocket、BOOM）到各类片上总线、
+缓存层次结构及特定领域加速器生成器的完整全栈式流程。
+Gemmini \cite{gemmini-dac}则是寄宿于 Chipyard 平台下的一个开源的、高度参数化的脉动阵列（Systolic Array）
+张量加速器生成器，其旨在探究 DNN 负载在包含访存机制与处理器协同情况下的系统级性能表现与实现上限。
 
-从系统级体系结构视角来看，Gemmini 与宿主 RISC-V 处理器核心依据 RoCC（Rocket Custom Coprocessor）非标准自定义协处理器指令集接口进行通信。Gemmini 在此机制下充当专用的矩阵乘法协处理器，直接挂载至处理器核心并经由 TileLink 系统总线访问共享的主存系统（如 L2 Cache 及外部 DRAM）。针对矩阵运算密集且数据带宽需求极高的特征，Gemmini 在内部创新采用了脱耦的访问执行（Decoupled Access/Execute）微体系结构设计原理。整体硬件逻辑被物理区分为并行的读/写控制器（Load/Store Controllers）与执行控制器（Execute Controller）。每类控制器维持独立的指令队列，并由内部重排序缓冲区（ROB）协调资源依赖与写后读（RAW）等数据冲突；在执行流运转时，读写控制器调配两条独立的内存直接访问（DMA）通道，批量、连续地执行系统 DRAM 与前端高速缓存间的大颗粒数据搬移。片上数据则被分类缓存于支持原地运算的累加器存储阵列（Accumulator SRAMs）以及面向基础特征图存取的便签式内存（Scratchpad SRAMs）中。该缓存与调度逻辑有效隐藏了极深的访存长时延，确保高能耗密度的计算通路不因数据饥饿而停滞。
+架构层面上，Gemmini 作为专用矩阵乘法协处理器，通过 RoCC 接口与宿主 RISC-V 核心通信，并经 TileLink 总线访问共享主存
+（如 L2 Cache 与外部 DRAM）。针对矩阵运算的高带宽需求，其内部采用脱耦的访问/执行（Decoupled Access/Execute）微架构。
+硬件物理上被划分为并行的读写控制器与执行控制器，二者维护独立指令队列，由内置重排序缓冲区（ROB）协调数据依赖与写后读（RAW）等冲突。
 
 \begin{figure}[htbp]
     \centering
-    % 占位符：此处需插入自 Gemmini 官方仓库下载的图片
-    % 图片来源：https://github.com/ucb-bar/gemmini/blob/master/img/gemmini-system.png
-    % 请下载图片并重命名为 gemmini-system.png 放入 figures/ 文件夹后取消注释下方代码。
-    % \includegraphics[width=0.8\textwidth]{figures/gemmini-system.png} 
-    \rule{0.8\textwidth}{6cm} % 调试用占位黑框，待插入图片后可删除
-    \vspace{0.2em}
-    \caption{Gemmini 协处理器系统级体系结构框架与存储分层示意图}
+    \includegraphics[width=0.8\textwidth]{gemmini-system.png}
+    % \vspace{0.2em}
+    \caption{Gemmini 协处理器系统级体系结构框架与存储分层示意图\cite{gemmini-dac}}
     \label{fig:gemmini-system}
 \end{figure}
 
-剥离开外围脱耦控制调度与繁杂的访存层，Gemmini 的核心算子是通用矩阵乘法操作（General Matrix Multiply, GEMM）。由于自然语言处理引擎尤其是 Transformer 模型的前馈计算充斥着成千上万个非离散的大尺寸矩阵变换轮次，该核心算子的运算效率直接构成了全系统的吞吐率及面积效能瓶颈。在 Gemmini 的实现中，这一核心算子依赖于其结构的最底层——一个二维、参数化及层级重构的脉动阵列（Systolic Array）。该阵列采用网格化布局，其基础构件被称为处理单元（Processing Element, PE）。多个 PE 无寄存器前向组合在一起形成“块”（Tile），相邻 Tile 之间排布着流水线暂存器（Pipeline Registers）。阵列本身不仅支持权重驻留（Weight-Stationary）数据流，也允许针对不同数据位宽及模型拓扑灵活选取输出驻留（Output-Stationary）模式。数据在此多级互联拓扑的触发下，以行和列向连波推进的模式完成大规模并发的“乘加”（Multiply-Accumulate, MAC）物理级收敛。
+Gemmini 的核心为通用矩阵乘法（GEMM），
+其性能与面积效率直接决定系统吞吐。在自然语言处理，尤其是 Transformer 
+的前馈路径中，大量大尺寸矩阵变换对算力与带宽提出严格要求。
+为此，Gemmini 在微结构上采用二维参数化的脉动阵列（systolic array），
+由若干处理单元（Processing Element, PE）按网格组织形成块（Tile），
+并以流水线寄存器连接相邻块。该阵列既支持权重驻留（weight‑stationary）
+数据流，也可在不同位宽和拓扑下切换为输出驻留（output‑stationary）模式。
+数据沿行列方向以连波（wavefront）方式推进，完成大规模并行的乘加（MAC）收敛，
+从而在保持高并发的同时最大化算力与数据局部性。
 
 \begin{figure}[htbp]
     \centering
-    % 占位符：此处需插入自 Gemmini 官方仓库下载的图片
-    % 图片来源：https://github.com/ucb-bar/gemmini/blob/master/img/gemmini-systolic-array.png
-    % 请下载图片并重命名为 gemmini-systolic-array.png 放入 figures/ 文件夹后取消注释下方代码。
-    % \includegraphics[width=0.6\textwidth]{figures/gemmini-systolic-array.png} 
-    \rule{0.6\textwidth}{5cm} % 调试用占位黑框，待插入图片后可删除
-    \vspace{0.2em}
-    \caption{Gemmini 两级并发的层级脉动阵列微结构与处理单元互连机制}
+    \includegraphics[width=0.8\textwidth]{gemmini-systolic-array.png}
+    % \vspace{0.2em}
+    \caption{Gemmini 两级并发的层级脉动阵列微结构与处理单元互连机制\cite{gemmini-dac}}
     \label{fig:gemmini-systolic}
 \end{figure}
 
-在本研究的设计框架与硬件重构路线内，上述核心算子的基本操作元（即精确乘加部件）成为引入近似计算的主阵地。原有的 PE 节点内部被全精度的数字逻辑硬件乘法器占据，其面积开销及静态漏电流功耗随着脉动网格二维标度的扩大呈现出严酷的平方级攀升。为打通从底层近似算法到宏观架构级特性的整套实证链路，本文工程化实施的关键步骤是以低功耗的近似乘法器核心——例如前文评估所最终沉淀的、具备近零且收敛误差特性的 $8\times8$ 位参数化 TOSAM 模块——在底层代码层面上实现对原生精确乘法器（Exact Multiplier）的全级剥离功能硬替换。
+在本研究中，阵列内每个 PE 的精确乘法器构成
+了面积与能耗的主要来源，其随网格规模二次增长而显著放大。
+为建立从器件级近似到体系级效能的可验证路径，本文采
+用工程化替换策略：在 PE 节点处以低功耗近似乘法器
+替换原生精确乘法器。此方案在保持 Gemmini 时序与接口语义一致的前提下，
+通过减小单体乘法器体积与关键路径长度，累积实现阵列级的功耗与面积优势，
+同时便于在仿真与综合流程中量化误差传播与系统级 PPA 权衡。
 
-通过精确点状的底层切入与植入，可以在保持大规模并发机制的前提下使阵列表现出多点叠加的微观替换红利。尤其值得注意的是，此种针对硬件抽象语法树叶子节点的“无感”重打配，完全维持了上层由 Gemmini 生成器推演出的时空调度机制、跨域 DMA 寻址通道以及 RISC-V 核心发派指令时的握手逻辑。这种在系统架构与协议一致性上的自洽，意味着替换完成后系统不会产生由流水线断裂引发的性能塌陷；同时，由于单体 MAC 逻辑的关键路径截断及组合逻辑体积的剧烈缩减，将顺着执行数据通路的结构堆栈反向汇聚出巨量的整体能耗与硅片开销优势。在此体系级集成的确立下，本研究可直接切入具备软硬件一致性的仿真与实测环境，通过向其投喂实际的大语言模型推演张量负载，验证这套近乎严苛受限的微架构演进在系统可容忍误差下的极限表现，从而在真正意义上探明近似计算在系统级层面的 PPA（Power, Performance, Area）兑现潜力及其可行边界。
 
 \subsection{Scala生成器逻辑修改与底层适配}
-本节重点说明为集成近似乘法器所进行的Scala生成器修改、RTL适配和接口对接工作，分析系统集成中的关键问题及解决方案。
+为将近似乘法器嵌入 Gemmini 而不破坏既有指令语义、数据流控制和阵列互连，
+本文采用“在最小可复用计算单元处局部替换”的集成策略，即将修改边界限定在
+\texttt{PE} 内部的 \texttt{MacUnit}，而不改动 \texttt{Tile}、\texttt{Mesh} 以及上层
+RoCC 接口。这一做法的核心考虑有二：其一，Gemmini 的权重驻留与输出驻留数据流均以 PE
+中的乘加操作为基础，若直接替换 MAC 的乘法路径，则可在保持阵列时序组织不变的前提下
+观察近似误差在系统中的真实传播；其二，局部封装便于后续在不同近似乘法器实现之间切换，
+避免对生成器主体进行大范围侵入式修改。
+
+具体实现上，首先在 \texttt{PE.scala} 中引入 \texttt{ApproxMulBlackBox}，
+将外部 SystemVerilog 模块 \texttt{approx\_mul.sv} 封装为 Chisel 可识别的黑盒资源。
+该黑盒接口固定为两个有符号 $8$ bit 输入和一个有符号 $16$ bit 输出，
+与 Gemmini 缺省整型阵列的 \texttt{SInt(8.W)} 乘法通路保持一致。
+在此基础上，本文进一步为 \texttt{MacUnit} 增加参数 \texttt{useApproxMul}，
+当该参数置位时，原先的精确表达式 \texttt{io.in\_c.mac(io.in\_a, io.in\_b)}
+被替换为“近似乘积 + 原累加项”的组合实现；否则仍保留原始精确 MAC 路径。
+这样一来，近似乘法器仅改变乘法结果的生成方式，而输入输出位宽、累加器写回路径、
+控制寄存器切换以及 OS/WS 两种数据流下的状态推进逻辑均不需要额外改写。
+从工程角度看，这种参数化接入方式确保了近似单元对 Gemmini 生成器的影响被限制在
+局部算术单元内部，具有较好的可维护性与可复现性。
+
+值得说明的是，近似乘法器的接入并非简单地以 Verilog 文件替换精确乘法器即可完成，
+而需要同时处理类型适配与资源绑定问题。Gemmini 原始 \texttt{MacUnit} 为泛型设计，
+而本文所接入的近似乘法器仅面向有符号 $8$ bit 整型输入，因此在 Scala 侧通过
+\texttt{require} 语句显式限定了输入类型与位宽；与此同时，利用
+\texttt{addResource("/vsrc/approx\_mul.sv")} 将底层 RTL 纳入生成系统，
+保证 Verilator 编译与后续综合流程均可自动解析该外部模块。由此形成的层级依赖关系可概括为
+\texttt{MeshWithDelays $\rightarrow$ Tile $\rightarrow$ PE\_256 $\rightarrow$ MacUnit $\rightarrow$ approx\_mul}，
+其中特定近似算法仅作用于最末端乘法节点，阵列级数据搬移与调度机制保持不变。
+
+\begin{lstlisting}[caption={Gemmini 中近似乘法路径的关键生成器改动},label={lst:approx-gemmini-scala},language=Java,basicstyle=\ttfamily\small]
+class ApproxMulBlackBox extends BlackBox with HasBlackBoxResource {
+  override def desiredName = "approx_mul"
+  val io = IO(new Bundle {
+    val a = Input(SInt(8.W))
+    val b = Input(SInt(8.W))
+    val result = Output(SInt(16.W))
+  })
+  addResource("/vsrc/approx_mul.sv")
+}
+
+if (useApproxMul) {
+  val approx_mul = Module(new ApproxMulBlackBox)
+  approx_mul.io.a := io.in_a.asTypeOf(SInt(8.W))
+  approx_mul.io.b := io.in_b.asTypeOf(SInt(8.W))
+  io.out_d := (approx_mul.io.result +&
+    io.in_c.asTypeOf(SInt(io.in_c.getWidth.W))).asTypeOf(io.out_d)
+} else {
+  io.out_d := io.in_c.mac(io.in_a, io.in_b)
+}
+\end{lstlisting}
+
+上述改动的一个直接收益在于：当 \texttt{approx\_mul.sv} 的端口定义保持稳定时，
+后续替换不同近似乘法器版本无需重新设计 Gemmini 的 Chisel 结构，
+仅需重新触发相应后端编译流程即可完成更新。这使本文能够将研究重点集中于“近似乘法器对系统行为的影响”
+而非反复处理大规模生成器重构问题，为后续综合、仿真和误差分析提供了清晰的工程基础。
 
 \subsection{仿真测试}
-本节介绍系统级验证环境的搭建过程，包括仿真测试、软件驱动适配、功能正确性验证以及协同调试流程。
+在完成生成器适配之后，本文进一步建立了覆盖“编译、综合、仿真”三个环节的复现链路。
+前端采用 Chipyard/Gemmini 的 Scala/Chisel 生成器完成 SoC 级硬件展开，
+并通过 \texttt{firtool} 导出可综合的 SystemVerilog；仿真端使用 Verilator 构建
+\texttt{simulator-chipyard.harness-ApproxGemminiRocketConfig}，
+软件端则编译裸机测试程序 \texttt{approx\_matmul\_test.c}；综合端将提取出的
+\texttt{approx\_mul}、\texttt{MacUnit}、\texttt{PE}、\texttt{Tile}、
+\texttt{Mesh} 与 \texttt{MeshWithDelays} 等层级送入 Design Compiler，
+生成面积、功耗与时序报告。整个流程既覆盖了从生成器到 RTL 的静态实现路径，
+也覆盖了从 CPU 发起调用到阵列返回结果的动态执行路径。
+
+\begin{figure}[htbp]
+    \centering
+    \begin{tikzpicture}[
+        node distance=8mm and 6mm,
+        >=Latex,
+        font=\small,
+        box/.style={rectangle, rounded corners=2pt, draw=black, align=center, text width=2.75cm, minimum height=0.95cm, fill=gray!8},
+        line/.style={-Latex, thick}
+    ]
+        \node[box] (rtl) {近似乘法器 RTL\\\texttt{approx\_mul.sv}};
+        \node[box, right=of rtl] (scala) {Gemmini 生成器适配\\\texttt{PE.scala}\\\texttt{MacUnit}};
+        \node[box, right=of scala] (elab) {Chipyard 展开与 RTL 导出\\Scala/Chisel + \texttt{firtool}};
+        \node[box, below=of elab] (sim) {Verilator SoC 仿真器\\\texttt{ApproxGemmini}\\\texttt{RocketConfig}};
+        \node[box, left=of sim] (cprog) {裸机矩阵乘法程序\\\texttt{approx\_matmul}\\\texttt{\_test.c}};
+        \node[box, right=of sim] (check) {CPU 精确基准对比\\误差统计与结果分析};
+        \node[box, right=of elab] (dc) {Design Compiler 综合\\面积/功耗/时序报告};
+
+        \draw[line] (rtl) -- (scala);
+        \draw[line] (scala) -- (elab);
+        \draw[line] (elab) -- (sim);
+        \draw[line] (cprog) -- (sim);
+        \draw[line] (sim) -- (check);
+        \draw[line] (elab) -- (dc);
+    \end{tikzpicture}
+    \caption{近似乘法器集成 Gemmini 的复现与验证流程}
+    \label{fig:approx-gemmini-flow}
+\end{figure}
+
+软件验证采用裸机方式而非 Linux 用户态程序，其目的在于尽量缩短软件栈路径，
+使观测结果更直接地反映硬件本体行为。测试程序首先在 CPU 侧完成精确矩阵乘法，
+得到 $32$ bit 累加精度下的基准结果；随后通过 \texttt{gemmini\_mvin} 将输入矩阵搬入
+片上存储，通过 \texttt{gemmini\_preload\_zeros} 与
+\texttt{gemmini\_compute\_preloaded} 触发 Gemmini 阵列计算，
+最后使用 \texttt{gemmini\_mvout} 读回累加器结果，并逐元素与 CPU 基准比较。
+这一流程确保了“软件可见结果”与“阵列内部近似乘法行为”之间建立起明确映射。
+
+\begin{lstlisting}[caption={$4\times4$ 裸机矩阵乘法测试的核心调用序列},label={lst:approx-gemmini-c},language=C,basicstyle=\ttfamily\small]
+cpu_matmul(A, B, C_ref);
+gemmini_mvin(A_full, A_sp_addr);
+gemmini_mvin(B_full, B_sp_addr);
+gemmini_preload_zeros(C_acc_addr);
+gemmini_compute_preloaded(A_sp_addr, B_sp_addr);
+gemmini_mvout(C_acc, C_acc_read_addr);
+\end{lstlisting}
+
+本文最终跑通了一个 $4\times4$ 矩阵乘法程序。设输入矩阵为
+\[
+\mathbf{A}=\begin{bmatrix}
+31 & -28 & -25 & -22 \\
+24 & -21 & -18 & -15 \\
+17 & -14 & -11 & -8 \\
+10 & -7 & -4 & -1
+\end{bmatrix},\qquad
+\mathbf{B}=\begin{bmatrix}
+30 & 19 & 8 & 3 \\
+25 & 14 & 3 & 8 \\
+20 & 9 & 2 & 13 \\
+15 & 4 & 7 & 18
+\end{bmatrix}.
+\]
+CPU 参考结果与近似Gemmini加速器的仿真结果分别为
+\[
+\mathbf{C}_{\mathrm{CPU}}=\mathbf{A}\mathbf{B}=\begin{bmatrix}
+2460 & 1294 & 128 & -1038 \\
+1830 & 972 & 114 & -744 \\
+1200 & 650 & 100 & -450 \\
+570 & 328 & 86 & -156
+\end{bmatrix},
+\]
+\[
+\mathbf{C}_{\mathrm{Gemmini}}=\begin{bmatrix}
+2503 & 1311 & 132 & -1058 \\
+1867 & 980 & 115 & -762 \\
+1213 & 658 & 100 & -458 \\
+582 & 332 & 87 & -158
+\end{bmatrix}.
+\]
+据此，元素级误差矩阵为
+\[
+\mathbf{E}=\mathbf{C}_{\mathrm{Gemmini}}-\mathbf{C}_{\mathrm{CPU}}=\begin{bmatrix}
+43 & 17 & 4 & -20 \\
+37 & 8 & 1 & -18 \\
+13 & 8 & 0 & -8 \\
+12 & 4 & 1 & -2
+\end{bmatrix}.
+\]
+
+从矩阵形式结果可以看出，Gemmini 输出与 CPU 基准在符号上保持一致，偏差主要体现为幅值上的轻微漂移。
+在 $16$ 个矩阵元素中，有 $15$ 个出现数值偏差，仅 $1$ 个元素与参考值完全一致。
+从统计指标看，最大绝对误差为 $43$，平均绝对误差为 $12.25$，均方根误差为 $17.27$，
+说明当前实现已完成从矩阵乘法输入、阵列计算到结果回传的完整闭环，但仍存在可进一步优化的数值误差。
+
+
+在工具链层面，本文已经完成从前端生成、后端编译到独立综合的闭环验证：
+一方面，Verilator 仿真证明了所设计近似单元能够嵌入 Chipyard-Gemmini SoC，
+并通过裸机程序触发矩阵乘法计算；另一方面，基于 Design Compiler 的综合流程也已经跑通，
+能够对导出的独立 RTL 生成面积、功耗和时序报告，为后文 PPA 分析提供数据基础。
+不过，受限于 Verilator 以单线程事件驱动为主的仿真机制，以及当前未能获得 Chipyard 对应的硬件加速仿真平台，
+本文尚难以在可接受时间内完成更大规模矩阵或更复杂工作负载的系统级遍历实验。
+因此，本阶段验证重点并不在于吞吐极限测试，而在于证明近似乘法器从底层 RTL 到 Gemmini 阵列、
+再到 CPU 软件调用链的集成路径是可行的。就这一目标而言，$4\times4$ 裸机程序的成功运行已经具有明确价值：
+它表明本文提出的近似算术单元并非停留于孤立电路级验证，而是已经能够作为 Gemmini 体系结构中的真实计算资源参与仿真执行。
 
 \clearpage
 \section{测试结果与性能评估}
@@ -584,6 +767,10 @@ e_{\mathrm{raw}}=P_{\mathrm{apx}}-P_{\mathrm{exact}}
 
 \subsection{逻辑综合与PPA评估}
 本节对设计进行逻辑综合，并从功耗（Power）、性能（Performance）和面积（Area）三个方面开展PPA评估，分析设计优化带来的综合收益。
+
+\subsubsection{算子级逻辑综合}
+
+\subsubsection{}
 
 \subsection{跨工艺节点的性能映射与外推研究}
 本节基于已有研究中的工艺缩放规律，对不同工艺节点下的面积、频率和功耗进行映射与外推，讨论设计在更先进工艺下的潜在表现。
