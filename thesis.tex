@@ -701,7 +701,7 @@ gemmini_compute_preloaded(A_sp_addr, B_sp_addr);
 gemmini_mvout(C_acc, C_acc_read_addr);
 \end{lstlisting}
 
-本文最终跑通了一个 $4\times4$ 矩阵乘法程序。设输入矩阵为
+本文最终跑通了一个 $4\times4$ 矩阵乘法程序（以TOSAM(3,7)近似乘法器为实现）。设输入矩阵为
 \[
 \mathbf{A}=\begin{bmatrix}
 31 & -28 & -25 & -22 \\
@@ -770,7 +770,7 @@ CPU 参考结果与近似Gemmini加速器的仿真结果分别为
 
 \subsubsection{算子级逻辑综合}
 
-\subsubsection{}
+\subsubsection{Gemmini协处理器级逻辑综合}
 
 \subsection{跨工艺节点的性能映射与外推研究}
 本节基于已有研究中的工艺缩放规律，对不同工艺节点下的面积、频率和功耗进行映射与外推，讨论设计在更先进工艺下的潜在表现。
